@@ -70,6 +70,34 @@ def find_lada_command() -> list[str] | None:
     return [executable] if executable else None
 
 
+def worker_performance_defaults(memory_mode: str) -> dict[str, str]:
+    """Return conservative-by-mode defaults for the production Python engine.
+
+    These remain environment defaults rather than hard overrides so advanced
+    users can still experiment from the outside when profiling a specific Mac.
+    """
+    if memory_mode == "Performance":
+        cpu_threads = "4"
+        mps_empty_cache_interval = "12"
+    elif memory_mode == "Long Video":
+        cpu_threads = "2"
+        mps_empty_cache_interval = "3"
+    elif memory_mode == "Conservative":
+        cpu_threads = "1"
+        mps_empty_cache_interval = "1"
+    else:
+        cpu_threads = "2"
+        mps_empty_cache_interval = "4"
+
+    return {
+        "OMP_NUM_THREADS": cpu_threads,
+        "MKL_NUM_THREADS": cpu_threads,
+        "VECLIB_MAXIMUM_THREADS": cpu_threads,
+        "NUMEXPR_NUM_THREADS": cpu_threads,
+        "LADA_MPS_EMPTY_CACHE_INTERVAL": mps_empty_cache_interval,
+    }
+
+
 def child_environment(source_root: str | None, request: dict[str, object] | None = None) -> dict[str, str]:
     environment = os.environ.copy()
     memory_mode = str((request or {}).get("memoryMode", "Auto (Unified Memory)"))
@@ -84,21 +112,11 @@ def child_environment(source_root: str | None, request: dict[str, object] | None
     environment.setdefault("LADA_DIAGNOSTIC_CLIP_INTERVAL", "10")
     environment.setdefault("LADA_DIAGNOSTIC_SLOW_CLIP_SECONDS", "15")
     environment.setdefault("LADA_WRITE_IN_PROGRESS_OUTPUT", "1")
-    environment.setdefault("OMP_NUM_THREADS", "1")
-    environment.setdefault("MKL_NUM_THREADS", "1")
-    environment.setdefault("VECLIB_MAXIMUM_THREADS", "1")
-    environment.setdefault("NUMEXPR_NUM_THREADS", "1")
-    if memory_mode == "Performance":
-        environment.setdefault("LADA_MPS_EMPTY_CACHE_INTERVAL", "4")
-        environment["VECLIB_MAXIMUM_THREADS"] = "2"
-    elif memory_mode == "Long Video":
-        environment.setdefault("LADA_MPS_EMPTY_CACHE_INTERVAL", "2")
+    for key, value in worker_performance_defaults(memory_mode).items():
+        environment.setdefault(key, value)
+    if memory_mode == "Long Video":
         environment.setdefault("LADA_MAX_DETECTIONS_PER_FRAME", "2")
         environment.setdefault("LADA_MIN_DETECTION_CONFIDENCE", "0.25")
-    elif memory_mode == "Conservative":
-        environment.setdefault("LADA_MPS_EMPTY_CACHE_INTERVAL", "1")
-    else:
-        environment.setdefault("LADA_MPS_EMPTY_CACHE_INTERVAL", "2")
     if environment.get("LADA_EXPERIMENTAL_RAW_METAL") == "1":
         environment.setdefault("PYTORCH_MPS_PREFER_METAL", "1")
     else:
@@ -296,17 +314,29 @@ def run_lada_attempt(
     global ACTIVE_PROCESS
     source_root = os.environ.get("LADA_SOURCE_ROOT")
     command = build_lada_command(request, lada_command, device, max_clip_length=max_clip_length)
+    environment = child_environment(source_root, request)
+    tuning_keys = (
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+        "LADA_MPS_EMPTY_CACHE_INTERVAL",
+        "LADA_MAX_DETECTIONS_PER_FRAME",
+        "LADA_MIN_DETECTION_CONFIDENCE",
+    )
+    tuning = {key: environment[key] for key in tuning_keys if key in environment}
 
     emit(
         "started",
         command=command,
         device=device,
         maxClipLength=max_clip_length if max_clip_length is not None else int(request.get("maxClipLength", 150)),
+        message=f"memoryMode={request.get('memoryMode', 'Auto (Unified Memory)')} · workerTuning={tuning}",
     )
     process = subprocess.Popen(
         command,
         cwd=source_root,
-        env=child_environment(source_root, request),
+        env=environment,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
