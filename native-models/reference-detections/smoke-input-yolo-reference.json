@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "source": "/Users/kenlo/Documents/Codex/2026-06-21/cn/work/smoke-input.mp4",
+  "weights": "/Users/kenlo/Documents/Codex/2026-06-21/cn/vendor/lada/model_weights/lada_mosaic_detection_model_v4_fast.pt",
+  "device": "cpu",
+  "imgsz": 640,
+  "stride": 32,
+  "conf": 0.15,
+  "iou": 0.7,
+  "classes": null,
+  "letterbox": {
+    "kind": "ultralytics",
+    "auto": true,
+    "stride": 32
+  },
+  "frames": [
+    {
+      "frame_index": 0,
+      "width": 320,
+      "height": 240,
+      "detections": [
+        {
+          "cls": 0,
+          "confidence": 0.8711675405502319,
+          "xyxy": [
+            3.249725341796875,
+            0.9682464599609375,
+            317.50360107421875,
+            239.59335327148438
+          ],
+          "mask_shape": [
+            1,
+            480,
+            640
+          ],
+          "mask_area": 303343
+        }
+      ]
+    },
+    {
+      "frame_index": 3,
+      "width": 320,
+      "height": 240,
+      "detections": [
+        {
+          "cls": 0,
+          "confidence": 0.8709051609039307,
+          "xyxy": [
+            2.090972900390625,
+            0.707794189453125,
+            315.3939514160156,
+            239.47250366210938
+          ],
+          "mask_shape": [
+            1,
+            480,
+            640
+          ],
+          "mask_area": 303107
+        }
+      ]
+    },
+    {
+      "frame_index": 5,
+      "width": 320,
+      "height": 240,
+      "detections": [
+        {
+          "cls": 0,
+          "confidence": 0.8709051609039307,
+          "xyxy": [
+            2.090972900390625,
+            0.707794189453125,
+            315.3939514160156,
+            239.47250366210938
+          ],
+          "mask_shape": [
+            1,
+            480,
+            640
+          ],
+          "mask_area": 303107
+        }
+      ]
+    }
+  ]
+}

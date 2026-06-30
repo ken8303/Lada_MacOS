@@ -1,0 +1,31 @@
+.DS_Store
+
+# SwiftPM / Xcode build products
+.build/
+.build-*/
+DerivedData/
+
+# Packaged app artifacts and local run output
+outputs/
+work/
+*.progress-debug.jsonl
+*.in-progress.mp4
+*.restored.mp4
+
+# Bundled/generated Python runtime
+.runtime/
+runtime/
+vendor/lada/.venv/
+vendor/lada/lada.egg-info/
+vendor/lada/.git/
+vendor/lada/datasets/
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Local scratch/cache files
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.log
