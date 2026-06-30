@@ -17,6 +17,10 @@ protocol NativeGeometryRestorationRegionProvider: NativeRestorationRegionProvide
     func regions(frameWidth: Int, frameHeight: Int) throws -> [NativeRestorationRegion]
 }
 
+protocol NativePixelBufferRestorationRegionProvider: NativeRestorationRegionProvider {
+    func regions(for pixelBuffer: CVPixelBuffer) throws -> [NativeRestorationRegion]
+}
+
 protocol NativeRegionRestorer: Sendable {
     func restore(
         modelInput: [UInt8],
@@ -249,14 +253,16 @@ final class NativeFrameRestorationPipeline: @unchecked Sendable {
     }
 
     func process(pixelBuffer: CVPixelBuffer) throws -> CVPixelBuffer {
-        guard let geometryProvider = regionProvider as? any NativeGeometryRestorationRegionProvider else {
+        let regions: [NativeRestorationRegion]
+        if let geometryProvider = regionProvider as? any NativeGeometryRestorationRegionProvider {
+            regions = try geometryProvider.regions(frameWidth: CVPixelBufferGetWidth(pixelBuffer), frameHeight: CVPixelBufferGetHeight(pixelBuffer))
+        } else if let pixelBufferProvider = regionProvider as? any NativePixelBufferRestorationRegionProvider {
+            regions = try pixelBufferProvider.regions(for: pixelBuffer)
+        } else {
             let sourceFrame = try NativePixelBufferBridge.copyBGRAFrame(from: pixelBuffer)
             let processedFrame = try process(frame: sourceFrame)
             return try NativePixelBufferBridge.makePixelBuffer(from: processedFrame)
         }
-        let width = CVPixelBufferGetWidth(pixelBuffer)
-        let height = CVPixelBufferGetHeight(pixelBuffer)
-        let regions = try geometryProvider.regions(frameWidth: width, frameHeight: height)
         guard !regions.isEmpty else {
             return pixelBuffer
         }
@@ -269,10 +275,7 @@ final class NativeFrameRestorationPipeline: @unchecked Sendable {
                 target: target
             )
         }
-        let outputBytes = try imageProcessor.readBGRABytes(from: outputTexture)
-        return try NativePixelBufferBridge.makePixelBuffer(
-            from: NativeBGRAFrame(width: width, height: height, bytes: outputBytes)
-        )
+        return try imageProcessor.makePixelBuffer(from: outputTexture)
     }
 
     private func process(

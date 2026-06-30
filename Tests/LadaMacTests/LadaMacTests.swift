@@ -442,10 +442,13 @@ func nativeFrameRestorationPipelineUsesTextureBackedPixelBufferPathForGeometryRe
     )
 
     let outputPixelBuffer = try pipeline.process(pixelBuffer: pixelBuffer)
+    let outputTexture = try NativeMetalImageProcessor().pixelBufferBridge.texture(from: outputPixelBuffer)
     let output = try NativePixelBufferBridge.copyBGRAFrame(from: outputPixelBuffer)
 
     #expect(provider.geometryCallCount == 1)
     #expect(provider.frameCallCount == 0)
+    #expect(outputTexture.texture.width == 8)
+    #expect(outputTexture.texture.height == 8)
     #expect(output.width == 8)
     #expect(output.height == 8)
     for y in 0..<8 {
@@ -1012,6 +1015,41 @@ func nativeCoreMLDetectorBuildsYOLOInputTensorFromBGRAFrame() throws {
 }
 
 @Test
+func nativeCoreMLDetectorBuildsYOLOInputTensorFromPixelBuffer() throws {
+    let postprocessor = NativeYOLOPostprocessor(modelInputSize: 2)
+    let detector = NativeCoreMLMosaicDetector(
+        modelURL: nil,
+        postprocessor: postprocessor
+    )
+    let frame = NativeBGRAFrame(
+        width: 2,
+        height: 2,
+        bytes: [
+            10, 20, 30, 255,
+            40, 50, 60, 255,
+            70, 80, 90, 255,
+            100, 110, 120, 255
+        ]
+    )
+    let pixelBuffer = try NativePixelBufferBridge.makePixelBuffer(from: frame)
+
+    let provider = try detector.makeInputFeatureProvider(from: pixelBuffer)
+    let input = try #require(
+        provider.featureValue(
+            for: NativeCoreMLMosaicDetector.inputFeatureName
+        )?.multiArrayValue
+    )
+
+    #expect(input.shape.map(\.intValue) == [1, 3, 2, 2])
+    #expect(Float(truncating: input[0]) == Float(30) / 255)
+    #expect(Float(truncating: input[4]) == Float(20) / 255)
+    #expect(Float(truncating: input[8]) == Float(10) / 255)
+    #expect(Float(truncating: input[3]) == Float(120) / 255)
+    #expect(Float(truncating: input[7]) == Float(110) / 255)
+    #expect(Float(truncating: input[11]) == Float(100) / 255)
+}
+
+@Test
 func nativeCoreMLDetectorLetterboxesWideFrameInputTensor() throws {
     let postprocessor = NativeYOLOPostprocessor(modelInputSize: 4)
     let detector = NativeCoreMLMosaicDetector(
@@ -1080,6 +1118,51 @@ func nativeCoreMLDetectorBuildsUltralyticsImageInput() throws {
     )
 
     let provider = try detector.makeImageInputFeatureProvider(from: frame)
+    let pixelBuffer = try #require(
+        provider.featureValue(
+            for: NativeCoreMLMosaicDetector.imageInputFeatureName
+        )?.imageBufferValue
+    )
+    let roundTripped = try NativePixelBufferBridge.copyBGRAFrame(from: pixelBuffer)
+
+    #expect(roundTripped.width == 4)
+    #expect(roundTripped.height == 4)
+    #expect(roundTripped.bytes[0] == 114)
+    #expect(roundTripped.bytes[1] == 114)
+    #expect(roundTripped.bytes[2] == 114)
+    #expect(roundTripped.bytes[16] == 10)
+    #expect(roundTripped.bytes[17] == 20)
+    #expect(roundTripped.bytes[18] == 30)
+    #expect(roundTripped.bytes[44] == 220)
+    #expect(roundTripped.bytes[45] == 230)
+    #expect(roundTripped.bytes[46] == 240)
+    #expect(roundTripped.bytes[60] == 114)
+}
+
+@Test
+func nativeCoreMLDetectorBuildsUltralyticsImageInputFromPixelBuffer() throws {
+    let postprocessor = NativeYOLOPostprocessor(modelInputSize: 4)
+    let detector = NativeCoreMLMosaicDetector(
+        modelURL: nil,
+        postprocessor: postprocessor
+    )
+    let frame = NativeBGRAFrame(
+        width: 4,
+        height: 2,
+        bytes: [
+            10, 20, 30, 255,
+            40, 50, 60, 255,
+            70, 80, 90, 255,
+            100, 110, 120, 255,
+            130, 140, 150, 255,
+            160, 170, 180, 255,
+            190, 200, 210, 255,
+            220, 230, 240, 255
+        ]
+    )
+    let sourcePixelBuffer = try NativePixelBufferBridge.makePixelBuffer(from: frame)
+
+    let provider = try detector.makeImageInputFeatureProvider(from: sourcePixelBuffer)
     let pixelBuffer = try #require(
         provider.featureValue(
             for: NativeCoreMLMosaicDetector.imageInputFeatureName

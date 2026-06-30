@@ -13,6 +13,8 @@ enum NativeMetalImageProcessorError: LocalizedError {
     case textureCreationFailed
     case textureCacheCreationFailed(CVReturn)
     case cvTextureCreationFailed(CVReturn)
+    case pixelBufferPoolCreationFailed(CVReturn)
+    case pixelBufferCreationFailed(CVReturn)
     case invalidInput
     case commandFailed(String)
 
@@ -36,6 +38,10 @@ enum NativeMetalImageProcessorError: LocalizedError {
             "The native Metal CVMetalTextureCache could not be created (\(status))."
         case .cvTextureCreationFailed(let status):
             "The native Metal processor could not wrap a CVPixelBuffer as a texture (\(status))."
+        case .pixelBufferPoolCreationFailed(let status):
+            "The native Metal output pixel-buffer pool could not be created (\(status))."
+        case .pixelBufferCreationFailed(let status):
+            "The native Metal output pixel buffer could not be created (\(status))."
         case .invalidInput:
             "The native Metal image processor received mismatched frame data."
         case .commandFailed(let message):
@@ -155,6 +161,61 @@ final class NativeMetalPixelBufferTextureBridge: @unchecked Sendable {
     }
 }
 
+final class NativeMetalPixelBufferPool: @unchecked Sendable {
+    private struct Key: Hashable {
+        let width: Int
+        let height: Int
+    }
+
+    private let lock = NSLock()
+    private var pools: [Key: CVPixelBufferPool] = [:]
+
+    func pixelBuffer(width: Int, height: Int) throws -> CVPixelBuffer {
+        guard width > 0, height > 0 else {
+            throw NativeMetalImageProcessorError.invalidInput
+        }
+        let key = Key(width: width, height: height)
+        let pool: CVPixelBufferPool = try lock.withLock {
+            if let pool = pools[key] {
+                return pool
+            }
+            var maybePool: CVPixelBufferPool?
+            let status = CVPixelBufferPoolCreate(
+                kCFAllocatorDefault,
+                [
+                    kCVPixelBufferPoolMinimumBufferCountKey: 3
+                ] as CFDictionary,
+                [
+                    kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
+                    kCVPixelBufferWidthKey: width,
+                    kCVPixelBufferHeightKey: height,
+                    kCVPixelBufferCGImageCompatibilityKey: true,
+                    kCVPixelBufferCGBitmapContextCompatibilityKey: true,
+                    kCVPixelBufferMetalCompatibilityKey: true,
+                    kCVPixelBufferIOSurfacePropertiesKey: [:]
+                ] as CFDictionary,
+                &maybePool
+            )
+            guard status == kCVReturnSuccess, let maybePool else {
+                throw NativeMetalImageProcessorError.pixelBufferPoolCreationFailed(status)
+            }
+            pools[key] = maybePool
+            return maybePool
+        }
+
+        var maybePixelBuffer: CVPixelBuffer?
+        let status = CVPixelBufferPoolCreatePixelBuffer(
+            kCFAllocatorDefault,
+            pool,
+            &maybePixelBuffer
+        )
+        guard status == kCVReturnSuccess, let pixelBuffer = maybePixelBuffer else {
+            throw NativeMetalImageProcessorError.pixelBufferCreationFailed(status)
+        }
+        return pixelBuffer
+    }
+}
+
 final class NativeMetalImageProcessor: @unchecked Sendable {
     private struct BlendParams {
         var alpha: Float
@@ -169,6 +230,7 @@ final class NativeMetalImageProcessor: @unchecked Sendable {
     let device: MTLDevice
     let texturePool: NativeMetalTexturePool
     let pixelBufferBridge: NativeMetalPixelBufferTextureBridge
+    let outputPixelBufferPool: NativeMetalPixelBufferPool
 
     private let commandQueue: MTLCommandQueue
     private let blendPipeline: MTLComputePipelineState
@@ -204,6 +266,7 @@ final class NativeMetalImageProcessor: @unchecked Sendable {
         self.commandQueue = commandQueue
         self.texturePool = NativeMetalTexturePool(device: device)
         self.pixelBufferBridge = try NativeMetalPixelBufferTextureBridge(device: device)
+        self.outputPixelBufferPool = NativeMetalPixelBufferPool()
         self.bilinearScale = MPSImageBilinearScale(device: device)
     }
 
@@ -414,6 +477,36 @@ final class NativeMetalImageProcessor: @unchecked Sendable {
             texturePool.recycle(staging)
         }
         return bytes
+    }
+
+    func makePixelBuffer(from texture: MTLTexture) throws -> CVPixelBuffer {
+        guard texture.pixelFormat == .bgra8Unorm else {
+            throw NativeMetalImageProcessorError.invalidInput
+        }
+        let pixelBuffer = try outputPixelBufferPool.pixelBuffer(
+            width: texture.width,
+            height: texture.height
+        )
+        let wrappedDestination = try pixelBufferBridge.texture(from: pixelBuffer)
+        let commandBuffer = try makeCommandBuffer()
+        guard let blit = commandBuffer.makeBlitCommandEncoder() else {
+            throw NativeMetalImageProcessorError.commandQueueMissing
+        }
+        blit.copy(
+            from: texture,
+            sourceSlice: 0,
+            sourceLevel: 0,
+            sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+            sourceSize: MTLSize(width: texture.width, height: texture.height, depth: 1),
+            to: wrappedDestination.texture,
+            destinationSlice: 0,
+            destinationLevel: 0,
+            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+        )
+        blit.endEncoding()
+        try submitAndWait(commandBuffer)
+        _ = wrappedDestination.cvTexture
+        return pixelBuffer
     }
 
     func submit(_ commandBuffer: MTLCommandBuffer) async throws {

@@ -1,3 +1,4 @@
+import CoreVideo
 import Foundation
 
 enum NativeDetectionMaskCoordinateSpace: Sendable {
@@ -21,7 +22,11 @@ protocol NativeMosaicDetector: Sendable {
     func detections(for frame: NativeBGRAFrame) throws -> [NativeMosaicDetection]
 }
 
-struct NativeDetectorRegionProvider: NativeRestorationRegionProvider {
+protocol NativePixelBufferMosaicDetector: NativeMosaicDetector {
+    func detections(for pixelBuffer: CVPixelBuffer) throws -> [NativeMosaicDetection]
+}
+
+struct NativeDetectorRegionProvider: NativePixelBufferRestorationRegionProvider {
     let detector: any NativeMosaicDetector
     let minimumConfidence: Float
 
@@ -38,6 +43,18 @@ struct NativeDetectorRegionProvider: NativeRestorationRegionProvider {
             .filter { $0.confidence >= minimumConfidence }
             .compactMap { $0.boundingBox.clamped(to: frame) }
     }
+
+    func regions(for pixelBuffer: CVPixelBuffer) throws -> [NativeRestorationRegion] {
+        guard let pixelBufferDetector = detector as? any NativePixelBufferMosaicDetector else {
+            let frame = try NativePixelBufferBridge.copyBGRAFrame(from: pixelBuffer)
+            return try regions(for: frame)
+        }
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+        return try pixelBufferDetector.detections(for: pixelBuffer)
+            .filter { $0.confidence >= minimumConfidence }
+            .compactMap { $0.boundingBox.clamped(frameWidth: width, frameHeight: height) }
+    }
 }
 
 struct FixedNativeMosaicDetector: NativeMosaicDetector {
@@ -50,10 +67,14 @@ struct FixedNativeMosaicDetector: NativeMosaicDetector {
 
 extension NativeRestorationRegion {
     func clamped(to frame: NativeBGRAFrame) -> NativeRestorationRegion? {
+        clamped(frameWidth: frame.width, frameHeight: frame.height)
+    }
+
+    func clamped(frameWidth: Int, frameHeight: Int) -> NativeRestorationRegion? {
         let minX = max(x, 0)
         let minY = max(y, 0)
-        let maxX = min(x + width, frame.width)
-        let maxY = min(y + height, frame.height)
+        let maxX = min(x + width, frameWidth)
+        let maxY = min(y + height, frameHeight)
         guard maxX > minX, maxY > minY else {
             return nil
         }
