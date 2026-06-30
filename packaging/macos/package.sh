@@ -239,6 +239,8 @@ write_release_notes() {
     printf '%s\n' "- Native video: uses modern async AVFoundation track metadata loading with warning-clean Swift test/build coverage"
     printf '%s\n' "- Native frame bridge: copies decoded AVFoundation BGRA pixel buffers into Metal and converts processed BGRA frames back to CVPixelBuffer for writing"
     printf '%s\n' "- Native Metal: includes BGRA mask-blend, nearest-resize, crop, and region-composite compute kernels with Swift test coverage"
+    printf '%s\n' "- Native Metal texture path: adds a reusable texture pool, CVPixelBuffer-to-Metal texture bridge, MPS bilinear scaling, blit-based crop, scalar-alpha region composite, and async command-buffer submission for the experimental native restoration path"
+    printf '%s\n' "- Native engine texture path: experimental geometry-region processing now wraps decoder CVPixelBuffers as Metal textures directly and only falls back to full-frame byte copies for detector-backed regions"
     printf '%s\n' ""
     printf '%s\n' "SHA-256:"
     printf '%s\n' ""

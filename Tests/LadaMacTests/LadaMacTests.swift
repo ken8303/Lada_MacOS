@@ -422,6 +422,45 @@ func nativeFrameRestorationPipelineUsesMultipleProvidedRegions() throws {
 }
 
 @Test
+func nativeFrameRestorationPipelineUsesTextureBackedPixelBufferPathForGeometryRegions() throws {
+    let frame = NativeBGRAFrame(
+        width: 8,
+        height: 8,
+        bytes: Array(repeating: [0, 0, 0, 255], count: 64).flatMap { $0 }
+    )
+    let pixelBuffer = try NativePixelBufferBridge.makePixelBuffer(from: frame)
+    let provider = CountingGeometryNativeRestorationRegionProvider(
+        regions: [
+            NativeRestorationRegion(x: 2, y: 2, width: 4, height: 4)
+        ]
+    )
+    let pipeline = try NativeFrameRestorationPipeline(
+        imageProcessor: NativeMetalImageProcessor(),
+        regionProvider: provider,
+        modelInputSize: 4,
+        blendStrength: 1
+    )
+
+    let outputPixelBuffer = try pipeline.process(pixelBuffer: pixelBuffer)
+    let output = try NativePixelBufferBridge.copyBGRAFrame(from: outputPixelBuffer)
+
+    #expect(provider.geometryCallCount == 1)
+    #expect(provider.frameCallCount == 0)
+    #expect(output.width == 8)
+    #expect(output.height == 8)
+    for y in 0..<8 {
+        for x in 0..<8 {
+            let base = (y * 8 + x) * 4
+            let insideRegion = x >= 2 && x < 6 && y >= 2 && y < 6
+            #expect(output.bytes[base] == (insideRegion ? 40 : 0))
+            #expect(output.bytes[base + 1] == (insideRegion ? 40 : 0))
+            #expect(output.bytes[base + 2] == (insideRegion ? 40 : 0))
+            #expect(output.bytes[base + 3] == 255)
+        }
+    }
+}
+
+@Test
 func nativeFrameRestorationPipelineUsesInjectedRegionRestorer() throws {
     let source: [UInt8] = Array(repeating: [0, 0, 0, 255], count: 16).flatMap { $0 }
     let restorer = FixedNativeRegionRestorer(
@@ -1717,6 +1756,50 @@ private final class CountingNativeRestorationRegionProvider: NativeRestorationRe
             calls += 1
         }
         return suppliedRegions.compactMap { $0.clamped(to: frame) }
+    }
+}
+
+private final class CountingGeometryNativeRestorationRegionProvider: NativeGeometryRestorationRegionProvider, @unchecked Sendable {
+    private let lock = NSLock()
+    private var frameCalls = 0
+    private var geometryCalls = 0
+    private let suppliedRegions: [NativeRestorationRegion]
+
+    init(regions: [NativeRestorationRegion]) {
+        self.suppliedRegions = regions
+    }
+
+    var frameCallCount: Int {
+        lock.withLock {
+            frameCalls
+        }
+    }
+
+    var geometryCallCount: Int {
+        lock.withLock {
+            geometryCalls
+        }
+    }
+
+    func regions(for frame: NativeBGRAFrame) throws -> [NativeRestorationRegion] {
+        lock.withLock {
+            frameCalls += 1
+        }
+        return suppliedRegions.compactMap { $0.clamped(to: frame) }
+    }
+
+    func regions(frameWidth: Int, frameHeight: Int) throws -> [NativeRestorationRegion] {
+        lock.withLock {
+            geometryCalls += 1
+        }
+        return suppliedRegions.filter { region in
+            region.x >= 0 &&
+            region.y >= 0 &&
+            region.width > 0 &&
+            region.height > 0 &&
+            region.x + region.width <= frameWidth &&
+            region.y + region.height <= frameHeight
+        }
     }
 }
 

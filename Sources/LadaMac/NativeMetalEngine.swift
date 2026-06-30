@@ -69,11 +69,7 @@ final class NativeMetalEngine: RestorationEngine, @unchecked Sendable {
             regionProvider: regionProvider ?? makeDefaultRegionProvider()
         )
         return { pixelBuffer in
-            let sourceFrame = try NativePixelBufferBridge.copyBGRAFrame(from: pixelBuffer)
-            let processedFrame = try pipeline.process(frame: sourceFrame)
-            return try NativePixelBufferBridge.makePixelBuffer(
-                from: processedFrame
-            )
+            try pipeline.process(pixelBuffer: pixelBuffer)
         }
     }
 

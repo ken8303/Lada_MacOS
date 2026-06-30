@@ -1,4 +1,6 @@
+import CoreVideo
 import Foundation
+import Metal
 
 struct NativeRestorationRegion: Sendable {
     let x: Int
@@ -9,6 +11,10 @@ struct NativeRestorationRegion: Sendable {
 
 protocol NativeRestorationRegionProvider: Sendable {
     func regions(for frame: NativeBGRAFrame) throws -> [NativeRestorationRegion]
+}
+
+protocol NativeGeometryRestorationRegionProvider: NativeRestorationRegionProvider {
+    func regions(frameWidth: Int, frameHeight: Int) throws -> [NativeRestorationRegion]
 }
 
 protocol NativeRegionRestorer: Sendable {
@@ -167,32 +173,40 @@ struct NativeCoreMLTemporalRestorer: NativeTemporalRegionRestorer {
     }
 }
 
-struct CenterNativeRestorationRegionProvider: NativeRestorationRegionProvider {
+struct CenterNativeRestorationRegionProvider: NativeGeometryRestorationRegionProvider {
     func regions(for frame: NativeBGRAFrame) throws -> [NativeRestorationRegion] {
-        let regionWidth = max(2, frame.width / 2)
-        let regionHeight = max(2, frame.height / 2)
+        try regions(frameWidth: frame.width, frameHeight: frame.height)
+    }
+
+    func regions(frameWidth: Int, frameHeight: Int) throws -> [NativeRestorationRegion] {
+        let regionWidth = max(2, frameWidth / 2)
+        let regionHeight = max(2, frameHeight / 2)
         return [
             NativeRestorationRegion(
-                x: max(0, (frame.width - regionWidth) / 2),
-                y: max(0, (frame.height - regionHeight) / 2),
-                width: min(regionWidth, frame.width),
-                height: min(regionHeight, frame.height)
+                x: max(0, (frameWidth - regionWidth) / 2),
+                y: max(0, (frameHeight - regionHeight) / 2),
+                width: min(regionWidth, frameWidth),
+                height: min(regionHeight, frameHeight)
             )
         ]
     }
 }
 
-struct FixedNativeRestorationRegionProvider: NativeRestorationRegionProvider {
+struct FixedNativeRestorationRegionProvider: NativeGeometryRestorationRegionProvider {
     let regions: [NativeRestorationRegion]
 
     func regions(for frame: NativeBGRAFrame) throws -> [NativeRestorationRegion] {
+        try regions(frameWidth: frame.width, frameHeight: frame.height)
+    }
+
+    func regions(frameWidth: Int, frameHeight: Int) throws -> [NativeRestorationRegion] {
         regions.filter { region in
             region.x >= 0 &&
             region.y >= 0 &&
             region.width > 0 &&
             region.height > 0 &&
-            region.x + region.width <= frame.width &&
-            region.y + region.height <= frame.height
+            region.x + region.width <= frameWidth &&
+            region.y + region.height <= frameHeight
         }
     }
 }
@@ -234,53 +248,131 @@ final class NativeFrameRestorationPipeline: @unchecked Sendable {
         return output
     }
 
+    func process(pixelBuffer: CVPixelBuffer) throws -> CVPixelBuffer {
+        guard let geometryProvider = regionProvider as? any NativeGeometryRestorationRegionProvider else {
+            let sourceFrame = try NativePixelBufferBridge.copyBGRAFrame(from: pixelBuffer)
+            let processedFrame = try process(frame: sourceFrame)
+            return try NativePixelBufferBridge.makePixelBuffer(from: processedFrame)
+        }
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+        let regions = try geometryProvider.regions(frameWidth: width, frameHeight: height)
+        guard !regions.isEmpty else {
+            return pixelBuffer
+        }
+
+        let wrappedSource = try imageProcessor.pixelBufferBridge.texture(from: pixelBuffer)
+        var outputTexture = wrappedSource.texture
+        for target in regions {
+            outputTexture = try process(
+                sourceTexture: outputTexture,
+                target: target
+            )
+        }
+        let outputBytes = try imageProcessor.readBGRABytes(from: outputTexture)
+        return try NativePixelBufferBridge.makePixelBuffer(
+            from: NativeBGRAFrame(width: width, height: height, bytes: outputBytes)
+        )
+    }
+
     private func process(
         frame: NativeBGRAFrame,
         target: NativeRestorationRegion
     ) throws -> NativeBGRAFrame {
-        let cropped = try imageProcessor.cropBGRA(
-            source: frame.bytes,
+        let sourceTexture = try imageProcessor.makeTexture(
+            fromBGRABytes: frame.bytes,
             width: frame.width,
-            height: frame.height,
-            x: target.x,
-            y: target.y,
-            cropWidth: target.width,
-            cropHeight: target.height
+            height: frame.height
         )
-        let modelInput = try imageProcessor.resizeBGRANearest(
-            source: cropped,
-            width: target.width,
-            height: target.height,
-            outputWidth: modelInputSize,
-            outputHeight: modelInputSize
+        let modelInputCommandBuffer = try imageProcessor.makeCommandBuffer()
+        let cropped = try imageProcessor.crop(
+            sourceTexture,
+            region: target,
+            commandBuffer: modelInputCommandBuffer
         )
+        let modelInputTexture = try imageProcessor.resize(
+            cropped,
+            toWidth: modelInputSize,
+            height: modelInputSize,
+            commandBuffer: modelInputCommandBuffer
+        )
+        try imageProcessor.submitAndWait(modelInputCommandBuffer)
+
+        let modelInput = try imageProcessor.readBGRABytes(from: modelInputTexture)
         let restoredModelOutput = try restorer.restore(
             modelInput: modelInput,
             width: modelInputSize,
             height: modelInputSize
         )
-        let restoredRegion = try imageProcessor.resizeBGRANearest(
-            source: restoredModelOutput,
+        let restoredTexture = try imageProcessor.makeTexture(
+            fromBGRABytes: restoredModelOutput,
             width: modelInputSize,
-            height: modelInputSize,
-            outputWidth: target.width,
-            outputHeight: target.height
+            height: modelInputSize
         )
-        let mask = [Float](
-            repeating: min(max(blendStrength, 0), 1),
-            count: target.width * target.height
+        let compositeCommandBuffer = try imageProcessor.makeCommandBuffer()
+        let restoredRegion = try imageProcessor.resize(
+            restoredTexture,
+            toWidth: target.width,
+            height: target.height,
+            commandBuffer: compositeCommandBuffer
         )
-        let composited = try imageProcessor.compositeBGRARegion(
-            source: frame.bytes,
+        let compositedTexture = try imageProcessor.compositeRegion(
+            source: sourceTexture,
             restoredRegion: restoredRegion,
-            mask: mask,
-            width: frame.width,
-            height: frame.height,
-            x: target.x,
-            y: target.y,
-            regionWidth: target.width,
-            regionHeight: target.height
+            origin: (target.x, target.y),
+            alpha: blendStrength,
+            commandBuffer: compositeCommandBuffer
         )
+        try imageProcessor.submitAndWait(compositeCommandBuffer)
+
+        let composited = try imageProcessor.readBGRABytes(from: compositedTexture)
         return NativeBGRAFrame(width: frame.width, height: frame.height, bytes: composited)
+    }
+
+    private func process(
+        sourceTexture: MTLTexture,
+        target: NativeRestorationRegion
+    ) throws -> MTLTexture {
+        let modelInputCommandBuffer = try imageProcessor.makeCommandBuffer()
+        let cropped = try imageProcessor.crop(
+            sourceTexture,
+            region: target,
+            commandBuffer: modelInputCommandBuffer
+        )
+        let modelInputTexture = try imageProcessor.resize(
+            cropped,
+            toWidth: modelInputSize,
+            height: modelInputSize,
+            commandBuffer: modelInputCommandBuffer
+        )
+        try imageProcessor.submitAndWait(modelInputCommandBuffer)
+
+        let modelInput = try imageProcessor.readBGRABytes(from: modelInputTexture)
+        let restoredModelOutput = try restorer.restore(
+            modelInput: modelInput,
+            width: modelInputSize,
+            height: modelInputSize
+        )
+        let restoredTexture = try imageProcessor.makeTexture(
+            fromBGRABytes: restoredModelOutput,
+            width: modelInputSize,
+            height: modelInputSize
+        )
+        let compositeCommandBuffer = try imageProcessor.makeCommandBuffer()
+        let restoredRegion = try imageProcessor.resize(
+            restoredTexture,
+            toWidth: target.width,
+            height: target.height,
+            commandBuffer: compositeCommandBuffer
+        )
+        let compositedTexture = try imageProcessor.compositeRegion(
+            source: sourceTexture,
+            restoredRegion: restoredRegion,
+            origin: (target.x, target.y),
+            alpha: blendStrength,
+            commandBuffer: compositeCommandBuffer
+        )
+        try imageProcessor.submitAndWait(compositeCommandBuffer)
+        return compositedTexture
     }
 }

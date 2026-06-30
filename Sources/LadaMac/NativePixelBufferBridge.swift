@@ -75,7 +75,9 @@ enum NativePixelBufferBridge {
             kCVPixelFormatType_32BGRA,
             [
                 kCVPixelBufferCGImageCompatibilityKey: true,
-                kCVPixelBufferCGBitmapContextCompatibilityKey: true
+                kCVPixelBufferCGBitmapContextCompatibilityKey: true,
+                kCVPixelBufferMetalCompatibilityKey: true,
+                kCVPixelBufferIOSurfacePropertiesKey: [:]
             ] as CFDictionary,
             &maybePixelBuffer
         )
