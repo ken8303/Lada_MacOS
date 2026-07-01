@@ -91,7 +91,7 @@ def worker_performance_defaults(memory_mode: str) -> dict[str, str]:
         serialize_mps = "1"
     elif memory_mode == "Long Video":
         cpu_threads = "2"
-        mps_empty_cache_interval = "3"
+        mps_empty_cache_interval = "8"
         serialize_mps = "1"
     elif memory_mode == "Conservative":
         cpu_threads = "1"

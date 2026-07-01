@@ -43,21 +43,21 @@ enum RestorationProfile: String, CaseIterable, Codable, Identifiable {
         switch self {
         case .fast:
             switch memoryMode {
-            case .longVideo: 30
+            case .longVideo: 45
             case .conservative: 30
             case .automatic: 45
             case .performance: 60
             }
         case .standard:
             switch memoryMode {
-            case .longVideo: 45
+            case .longVideo: 75
             case .conservative: 45
             case .automatic: 60
             case .performance: 75
             }
         case .accurate:
             switch memoryMode {
-            case .longVideo: 60
+            case .longVideo: 90
             case .conservative: 60
             case .automatic: 90
             case .performance: 90

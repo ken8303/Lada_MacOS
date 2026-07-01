@@ -217,7 +217,7 @@ func restorationProfilesHaveUsefulClipLengths() {
 
 @Test
 func restorationProfilesScaleClipLengthByMemoryMode() {
-    #expect(RestorationProfile.standard.maxClipLength(memoryMode: .longVideo) == 45)
+    #expect(RestorationProfile.standard.maxClipLength(memoryMode: .longVideo) == 75)
     #expect(RestorationProfile.standard.maxClipLength(memoryMode: .conservative) == 45)
     #expect(RestorationProfile.standard.maxClipLength(memoryMode: .automatic) == 60)
     #expect(RestorationProfile.standard.maxClipLength(memoryMode: .performance) == 75)
@@ -234,7 +234,7 @@ func newJobsDefaultToSpeedOrientedSettings() {
     #expect(job.quality == .balanced)
     #expect(job.memoryMode == .longVideo)
     #expect(job.outputFormat.encodingPreset(quality: job.quality) == "hevc-apple-gpu-fast")
-    #expect(job.profile.maxClipLength(memoryMode: job.memoryMode) == 45)
+    #expect(job.profile.maxClipLength(memoryMode: job.memoryMode) == 75)
 }
 
 @Test
