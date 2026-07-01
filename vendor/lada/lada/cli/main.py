@@ -42,7 +42,8 @@ from lada.cli import utils
 from lada.utils import audio_utils, video_utils
 from lada.utils.os_utils import gpu_has_fp16_acceleration, get_default_torch_device
 from lada.restorationpipeline.frame_restorer import FrameRestorer
-from lada.restorationpipeline import load_models
+from lada.restorationpipeline import load_detection_model, load_models, load_restoration_model, preferred_pad_mode_for_model
+from lada.restorationpipeline.clip_cache import run_detect_only_pass
 from lada.utils.threading_utils import STOP_MARKER, ErrorMarker
 from lada.utils.video_utils import get_video_meta_data, VideoWriter, get_default_preset_name
 
@@ -89,6 +90,8 @@ def setup_argparser() -> argparse.ArgumentParser:
     group_general.add_argument('--version', action='store_true', help=_("Display version and exit"))
     group_general.add_argument('--help', action='store_true', help=_("Show this help message and exit"))
     group_general.add_argument('--progress-json', action='store_true', help=argparse.SUPPRESS)
+    group_general.add_argument('--cache-detections-to', type=str, help=argparse.SUPPRESS)
+    group_general.add_argument('--restore-from-cache', type=str, help=argparse.SUPPRESS)
 
     export = parser.add_argument_group(_('Export'))
     export.add_argument('--encoding-preset', type=str, default=get_default_preset_name(), help=_('Select encoding preset by name. Use "--list-encoding-presets" to see what\'s available. Ignored if "--encoder" and "--encoder-options" are used (default: %(default)s)'))
@@ -114,7 +117,7 @@ def setup_argparser() -> argparse.ArgumentParser:
 
 def process_video_file(input_path: str, output_path: str, temp_dir_path: str, device: torch.device, mosaic_restoration_model, mosaic_detection_model,
                        mosaic_restoration_model_name, preferred_pad_mode, max_clip_length, encoder: str, encoder_options: str, mp4_fast_start,
-                       progress_json=False):
+                       progress_json=False, cache_detections_to: str | None = None, restore_from_cache: str | None = None):
     video_metadata = get_video_meta_data(input_path)
     diagnostics_enabled = progress_json
     try:
@@ -134,7 +137,34 @@ def process_video_file(input_path: str, output_path: str, temp_dir_path: str, de
 
     frame_restorer = FrameRestorer(device, input_path, max_clip_length, mosaic_restoration_model_name,
                  mosaic_detection_model, mosaic_restoration_model, preferred_pad_mode,
-                 diagnostic_callback=emit_diagnostic if diagnostics_enabled else None)
+                 diagnostic_callback=emit_diagnostic if diagnostics_enabled else None,
+                 restore_from_cache=restore_from_cache)
+    if cache_detections_to:
+        emit_diagnostic(
+            "detect-only",
+            "start",
+            input=input_path,
+            cacheDirectory=cache_detections_to,
+            totalFrames=video_metadata.frames_count,
+            fps=float(video_metadata.video_fps),
+            maxClipLength=max_clip_length,
+        )
+        started_at = time.monotonic()
+        run_detect_only_pass(
+            frame_restorer.mosaic_detector,
+            cache_detections_to,
+            input_path,
+            max_clip_length,
+            clip_size=256,
+            pad_mode=preferred_pad_mode,
+        )
+        emit_diagnostic(
+            "detect-only",
+            "complete",
+            cacheDirectory=cache_detections_to,
+            durationSeconds=time.monotonic() - started_at,
+        )
+        return
     success = True
     pathlib.Path(output_path).parent.mkdir(exist_ok=True, parents=True)
     write_in_progress_output = os.environ.get("LADA_WRITE_IN_PROGRESS_OUTPUT", "1") == "1"
@@ -275,6 +305,9 @@ def main():
     if args.help or not args.input:
         argparser.print_help()
         sys.exit(0)
+    if args.cache_detections_to and args.restore_from_cache:
+        print(_("Only one of --cache-detections-to or --restore-from-cache can be used"))
+        sys.exit(1)
     if args.device.startswith("cuda") and not torch.cuda.is_available():
         print(_("GPU {device} selected but CUDA is not available").format(device=args.device))
         sys.exit(1)
@@ -337,10 +370,29 @@ def main():
     assert encoder is not None and encoder_options is not None
 
     device = torch.device(args.device)
-    mosaic_detection_model, mosaic_restoration_model, preferred_pad_mode = load_models(
-        device, mosaic_restoration_model_name, mosaic_restoration_model_path, args.mosaic_restoration_config_path,
-        mosaic_detection_model_path, args.fp16, args.detect_face_mosaics
-    )
+    preferred_pad_mode = preferred_pad_mode_for_model(mosaic_restoration_model_name)
+    if args.cache_detections_to:
+        mosaic_detection_model = load_detection_model(
+            mosaic_detection_model_path,
+            device,
+            args.fp16,
+            args.detect_face_mosaics,
+        )
+        mosaic_restoration_model = None
+    elif args.restore_from_cache:
+        mosaic_detection_model = None
+        mosaic_restoration_model = load_restoration_model(
+            device,
+            mosaic_restoration_model_name,
+            mosaic_restoration_model_path,
+            args.mosaic_restoration_config_path,
+            args.fp16,
+        )
+    else:
+        mosaic_detection_model, mosaic_restoration_model, preferred_pad_mode = load_models(
+            device, mosaic_restoration_model_name, mosaic_restoration_model_path, args.mosaic_restoration_config_path,
+            mosaic_detection_model_path, args.fp16, args.detect_face_mosaics
+        )
 
     input_files, output_files = utils.setup_input_and_output_paths(args.input, args.output, args.output_file_pattern)
 
@@ -353,7 +405,8 @@ def main():
             process_video_file(input_path=input_path, output_path=output_path, temp_dir_path=args.temporary_directory, device=device, mosaic_restoration_model=mosaic_restoration_model, mosaic_detection_model=mosaic_detection_model,
                                mosaic_restoration_model_name=mosaic_restoration_model_name, preferred_pad_mode=preferred_pad_mode, max_clip_length=args.max_clip_length,
                                encoder=encoder, encoder_options=encoder_options, mp4_fast_start=args.mp4_fast_start,
-                               progress_json=args.progress_json)
+                               progress_json=args.progress_json, cache_detections_to=args.cache_detections_to,
+                               restore_from_cache=args.restore_from_cache)
         except KeyboardInterrupt:
             print(_("Received Ctrl-C, stopping restoration."))
             break

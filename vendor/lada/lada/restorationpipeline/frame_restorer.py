@@ -19,6 +19,7 @@ from lada.utils import visualization_utils
 from lada.utils.mps_safety import mps_serialized
 from lada.restorationpipeline.mosaic_detector import MosaicDetector
 from lada.restorationpipeline.mosaic_detector import Clip
+from lada.restorationpipeline.clip_cache import CachedMosaicDetector
 from lada.models.yolo.yolo11_segmentation_model import Yolo11SegmentationModel
 
 logger = logging.getLogger(__name__)
@@ -27,7 +28,7 @@ logging.basicConfig(level=LOG_LEVEL)
 class FrameRestorer:
     def __init__(self, device, video_file, max_clip_length, mosaic_restoration_model_name,
                  mosaic_detection_model: Yolo11SegmentationModel, mosaic_restoration_model, preferred_pad_mode,
-                 mosaic_detection=False, diagnostic_callback=None):
+                 mosaic_detection=False, diagnostic_callback=None, restore_from_cache: str | None = None):
         self.device = torch.device(device)
         self.mosaic_restoration_model_name = mosaic_restoration_model_name
         self.max_clip_length = max_clip_length
@@ -74,14 +75,23 @@ class FrameRestorer:
         # no queue size limit needed, elements are tiny
         self.frame_detection_queue = PipelineQueue(name="frame_detection_queue")
 
-        self.mosaic_detector = MosaicDetector(self.mosaic_detection_model, self.video_meta_data,
-                                              frame_detection_queue=self.frame_detection_queue,
-                                              mosaic_clip_queue=self.mosaic_clip_queue,
-                                              device=self.device,
-                                              max_clip_length=self.max_clip_length,
-                                              pad_mode=self.preferred_pad_mode,
-                                              error_handler=self._on_worker_thread_error,
-                                              diagnostic_callback=self._emit_diagnostic)
+        if restore_from_cache:
+            self.mosaic_detector = CachedMosaicDetector(
+                restore_from_cache,
+                frame_detection_queue=self.frame_detection_queue,
+                mosaic_clip_queue=self.mosaic_clip_queue,
+                error_handler=self._on_worker_thread_error,
+                diagnostic_callback=self._emit_diagnostic,
+            )
+        else:
+            self.mosaic_detector = MosaicDetector(self.mosaic_detection_model, self.video_meta_data,
+                                                  frame_detection_queue=self.frame_detection_queue,
+                                                  mosaic_clip_queue=self.mosaic_clip_queue,
+                                                  device=self.device,
+                                                  max_clip_length=self.max_clip_length,
+                                                  pad_mode=self.preferred_pad_mode,
+                                                  error_handler=self._on_worker_thread_error,
+                                                  diagnostic_callback=self._emit_diagnostic)
 
         self.clip_restoration_thread: PipelineThread | None = None
         self.frame_restoration_thread: PipelineThread | None = None
@@ -167,7 +177,7 @@ class FrameRestorer:
         thread.start()
 
     def _dump_queue_stats(self):
-        logger.debug(textwrap.dedent(f"""\
+        queue_stats = textwrap.dedent(f"""\
             FrameRestorer: Queue stats:
                 frame_restoration_queue/wait-time-get: {self.frame_restoration_queue.stats[f"{self.frame_restoration_queue.name}_wait_time_get"]:.0f}
                 frame_restoration_queue/wait-time-put: {self.frame_restoration_queue.stats[f"{self.frame_restoration_queue.name}_wait_time_put"]:.0f}
@@ -183,11 +193,15 @@ class FrameRestorer:
                 ---
                 restored_clip_queue/wait-time-get: {self.restored_clip_queue.stats[f"{self.restored_clip_queue.name}_wait_time_get"]:.0f}
                 restored_clip_queue/wait-time-put: {self.restored_clip_queue.stats[f"{self.restored_clip_queue.name}_wait_time_put"]:.0f}
-                restored_clip_queue/max-qsize: {self.restored_clip_queue.stats[f"{self.restored_clip_queue.name}_max_size"]}/{self.restored_clip_queue.maxsize}
+                restored_clip_queue/max-qsize: {self.restored_clip_queue.stats[f"{self.restored_clip_queue.name}_max_size"]}/{self.restored_clip_queue.maxsize}""")
+        if hasattr(self.mosaic_detector, "frame_feeder_queue"):
+            queue_stats += textwrap.dedent(f"""\
+
                 ---
                 frame_feeder_queue/wait-time-get: {self.mosaic_detector.frame_feeder_queue.stats[f"{self.mosaic_detector.frame_feeder_queue.name}_wait_time_get"]:.0f}
                 frame_feeder_queue/wait-time-put: {self.mosaic_detector.frame_feeder_queue.stats[f"{self.mosaic_detector.frame_feeder_queue.name}_wait_time_put"]:.0f}
-                frame_feeder_queue/max-qsize: {self.mosaic_detector.frame_feeder_queue.stats[f"{self.mosaic_detector.frame_feeder_queue.name}_max_size"]}/{self.mosaic_detector.frame_feeder_queue.maxsize}"""))
+                frame_feeder_queue/max-qsize: {self.mosaic_detector.frame_feeder_queue.stats[f"{self.mosaic_detector.frame_feeder_queue.name}_max_size"]}/{self.mosaic_detector.frame_feeder_queue.maxsize}""")
+        logger.debug(queue_stats)
 
     def _restore_clip_frames(self, images: list[ImageTensor]):
         if self.mosaic_restoration_model_name.startswith("deepmosaics"):

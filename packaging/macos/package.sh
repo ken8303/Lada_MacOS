@@ -218,6 +218,7 @@ write_release_notes() {
     printf '%s\n' "- Performance: Memory Mode now controls MPS clip length and MPS cache flushing frequency; Performance mode uses larger clips and less frequent cache flushes"
     printf '%s\n' "- Worker tuning: CPU helper threads now scale by Memory Mode instead of forcing one thread everywhere; Performance uses 4 threads and a less frequent MPS cache flush, Long Video uses 2 threads with the dense-section limiter"
     printf '%s\n' "- Worker MPS scheduling: keeps LADA_SERIALIZE_MPS=1 in every Memory Mode after real HUNTC-619 testing showed parallel PyTorch MPS crashes inside arange_mps_out; serialized retry fallback remains for externally overridden experiments"
+    printf '%s\n' "- Experimental two-pass restoration: set LADA_TWO_PASS_RESTORATION=1 to run detection into a temporary clip cache first, then restore from that cache, avoiding detection/restoration lock contention while validation continues"
     printf '%s\n' "- Dense-scene tuning: Long Video Standard now uses 75-frame clips and a less frequent MPS cache flush interval to reduce BasicVSR++ re-priming and forced syncs in dense mosaic sections"
     printf '%s\n' "- Defaults: new queue jobs now start with Quality Balanced and Memory Mode Long Video for steadier sustained throughput on dense or multi-hour videos"
     printf '%s\n' "- Encoding: Quality picker now selects Apple VideoToolbox fast/balanced/HQ presets instead of using one fixed preset"

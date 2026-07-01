@@ -14,6 +14,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -297,11 +298,12 @@ def build_lada_command(
     lada_command: list[str],
     device: str,
     max_clip_length: int | None = None,
+    extra_args: list[str] | None = None,
 ) -> list[str]:
     clip_length = max_clip_length
     if clip_length is None:
         clip_length = int(request.get("maxClipLength", 150))
-    return [
+    command = [
         *lada_command,
         "--input",
         str(request["input"]),
@@ -317,6 +319,9 @@ def build_lada_command(
         str(request.get("encodingPreset", "hevc-apple-gpu-balanced")),
         "--progress-json",
     ]
+    if extra_args:
+        command.extend(extra_args)
+    return command
 
 
 def run_lada_attempt(
@@ -325,10 +330,18 @@ def run_lada_attempt(
     device: str,
     max_clip_length: int | None = None,
     environment_overrides: dict[str, str] | None = None,
+    extra_args: list[str] | None = None,
+    pass_name: str | None = None,
 ) -> int:
     global ACTIVE_PROCESS
     source_root = os.environ.get("LADA_SOURCE_ROOT")
-    command = build_lada_command(request, lada_command, device, max_clip_length=max_clip_length)
+    command = build_lada_command(
+        request,
+        lada_command,
+        device,
+        max_clip_length=max_clip_length,
+        extra_args=extra_args,
+    )
     environment = child_environment(source_root, request)
     if environment_overrides:
         environment.update(environment_overrides)
@@ -348,6 +361,7 @@ def run_lada_attempt(
         "started",
         command=command,
         device=device,
+        restorationPass=pass_name,
         maxClipLength=max_clip_length if max_clip_length is not None else int(request.get("maxClipLength", 150)),
         message=f"memoryMode={request.get('memoryMode', 'Auto (Unified Memory)')} · workerTuning={tuning}",
     )
@@ -395,10 +409,13 @@ def run_lada_attempt(
                 framesProcessed=event.get("frames_processed"),
                 totalFrames=event.get("total_frames"),
                 meanFrameSeconds=event.get("mean_frame_seconds"),
+                restorationPass=pass_name,
             )
         elif event.get("type") == "diagnostic":
             payload = dict(event)
             payload.pop("type", None)
+            if pass_name:
+                payload["restorationPass"] = pass_name
             emit("diagnostic", **payload)
         else:
             emit("log", message=stripped)
@@ -411,15 +428,91 @@ def run_lada_attempt(
     return return_code
 
 
+def should_use_two_pass(request: dict[str, object]) -> bool:
+    if str(request.get("twoPassRestoration", "")).lower() in {"1", "true", "yes"}:
+        return True
+    memory_mode = str(request.get("memoryMode", ""))
+    if "two-pass" in memory_mode.lower() or "two pass" in memory_mode.lower():
+        return True
+    return os.environ.get("LADA_TWO_PASS_RESTORATION", "0") == "1"
+
+
+def run_lada_two_pass_attempt(
+    request: dict[str, object],
+    lada_command: list[str],
+    device: str,
+    max_clip_length: int,
+    environment_overrides: dict[str, str] | None = None,
+) -> int:
+    cache_root = pathlib.Path(os.environ.get("LADA_TWO_PASS_CACHE_ROOT", tempfile.gettempdir()))
+    cache_root.mkdir(parents=True, exist_ok=True)
+    cache_dir = pathlib.Path(tempfile.mkdtemp(prefix="lada_detection_cache_", dir=str(cache_root)))
+    keep_cache = os.environ.get("LADA_KEEP_TWO_PASS_CACHE", "0") == "1"
+    emit("log", message=f"Two-pass restoration enabled · cache={cache_dir}")
+    try:
+        detect_code = run_lada_attempt(
+            request,
+            lada_command,
+            device,
+            max_clip_length=max_clip_length,
+            environment_overrides=environment_overrides,
+            extra_args=["--cache-detections-to", str(cache_dir)],
+            pass_name="detect",
+        )
+        if detect_code != 0:
+            return detect_code
+        return run_lada_attempt(
+            request,
+            lada_command,
+            device,
+            max_clip_length=max_clip_length,
+            environment_overrides=environment_overrides,
+            extra_args=["--restore-from-cache", str(cache_dir)],
+            pass_name="restore",
+        )
+    finally:
+        if keep_cache:
+            emit("log", message=f"Keeping two-pass detection cache for debugging: {cache_dir}")
+        else:
+            shutil.rmtree(cache_dir, ignore_errors=True)
+
+
+def run_configured_lada_attempt(
+    request: dict[str, object],
+    lada_command: list[str],
+    device: str,
+    max_clip_length: int,
+    two_pass: bool,
+    environment_overrides: dict[str, str] | None = None,
+) -> int:
+    if two_pass:
+        return run_lada_two_pass_attempt(
+            request,
+            lada_command,
+            device,
+            max_clip_length=max_clip_length,
+            environment_overrides=environment_overrides,
+        )
+    return run_lada_attempt(
+        request,
+        lada_command,
+        device,
+        max_clip_length=max_clip_length,
+        environment_overrides=environment_overrides,
+    )
+
+
 def run_lada(request: dict[str, object], lada_command: list[str]) -> None:
     requested_device = str(request.get("device", "mps"))
     requested_clip_length = int(request.get("maxClipLength", 150))
     fallback_environment_overrides: dict[str, str] | None = None
-    return_code = run_lada_attempt(
+    two_pass = should_use_two_pass(request)
+    return_code = run_configured_lada_attempt(
         request,
         lada_command,
         requested_device,
         max_clip_length=requested_clip_length,
+        two_pass=two_pass,
     )
     if return_code == 0:
         emit("progress", progress=1.0, remainingSeconds=0)
@@ -449,11 +542,12 @@ def run_lada(request: dict[str, object], lada_command: list[str]) -> None:
             pathlib.Path(str(request["output"])).unlink(missing_ok=True)
         except OSError:
             pass
-        return_code = run_lada_attempt(
+        return_code = run_configured_lada_attempt(
             request,
             lada_command,
             requested_device,
             max_clip_length=requested_clip_length,
+            two_pass=two_pass,
             environment_overrides=fallback_environment_overrides,
         )
         if return_code == 0:
@@ -493,11 +587,12 @@ def run_lada(request: dict[str, object], lada_command: list[str]) -> None:
                 pathlib.Path(str(request["output"])).unlink(missing_ok=True)
             except OSError:
                 pass
-            return_code = run_lada_attempt(
+            return_code = run_configured_lada_attempt(
                 request,
                 lada_command,
                 "mps",
                 max_clip_length=clip_length,
+                two_pass=two_pass,
                 environment_overrides=fallback_environment_overrides,
             )
             if return_code == 0:
@@ -536,7 +631,13 @@ def run_lada(request: dict[str, object], lada_command: list[str]) -> None:
             pathlib.Path(str(request["output"])).unlink(missing_ok=True)
         except OSError:
             pass
-        return_code = run_lada_attempt(request, lada_command, "cpu")
+        return_code = run_configured_lada_attempt(
+            request,
+            lada_command,
+            "cpu",
+            max_clip_length=requested_clip_length,
+            two_pass=two_pass,
+        )
         if return_code == 0:
             emit("progress", progress=1.0, remainingSeconds=0)
             emit("completed", output=request["output"], simulated=False, fallbackDevice="cpu")

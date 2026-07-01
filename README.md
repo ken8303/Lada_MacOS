@@ -48,6 +48,10 @@ the worker simulates progress so the native workflow can still be developed.
   group and are covered by real MPS lifecycle tests.
 - Parent-process monitoring prevents GPU restoration jobs from becoming
   orphaned if the native app is force-quit.
+- Experimental two-pass restoration can be enabled with
+  `LADA_TWO_PASS_RESTORATION=1`; this runs detection first into a temporary
+  clip cache, then restores from that cache to avoid detection/restoration
+  contention under the serialized Apple MPS lock.
 - The app probes the embedded Python runtime, MPS device, and required models
   before enabling queue processing.
 - PyAV supplies a development fallback for video metadata when `ffprobe`
