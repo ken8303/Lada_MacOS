@@ -217,6 +217,7 @@ write_release_notes() {
     printf '%s\n' "- Stability: serializes Apple MPS model execution, defaults to safer 45/60/90 clip lengths, retries smaller MPS clips if MPSGraph aborts, and avoids silent CPU fallback unless explicitly enabled"
     printf '%s\n' "- Performance: Memory Mode now controls MPS clip length and MPS cache flushing frequency; Performance mode uses larger clips and less frequent cache flushes"
     printf '%s\n' "- Worker tuning: CPU helper threads now scale by Memory Mode instead of forcing one thread everywhere; Performance uses 4 threads and a less frequent MPS cache flush, Long Video uses 2 threads with the dense-section limiter"
+    printf '%s\n' "- Worker MPS scheduling: Auto, Long Video, and Performance now try parallel Apple GPU detection/restoration first (LADA_SERIALIZE_MPS=0), while Conservative stays serialized; if MPSGraph crashes, the worker retries with serialized MPS automatically"
     printf '%s\n' "- Defaults: new queue jobs now start with Quality Balanced and Memory Mode Long Video for steadier sustained throughput on dense or multi-hour videos"
     printf '%s\n' "- Encoding: Quality picker now selects Apple VideoToolbox fast/balanced/HQ presets instead of using one fixed preset"
     printf '%s\n' "- Live export output: while a job is processing, the worker writes a visible .in-progress.mp4 video beside the final output, then replaces it with the completed audio+video result at finish"

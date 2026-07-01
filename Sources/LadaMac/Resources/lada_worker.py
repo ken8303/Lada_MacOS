@@ -79,15 +79,19 @@ def worker_performance_defaults(memory_mode: str) -> dict[str, str]:
     if memory_mode == "Performance":
         cpu_threads = "4"
         mps_empty_cache_interval = "12"
+        serialize_mps = "0"
     elif memory_mode == "Long Video":
         cpu_threads = "2"
         mps_empty_cache_interval = "3"
+        serialize_mps = "0"
     elif memory_mode == "Conservative":
         cpu_threads = "1"
         mps_empty_cache_interval = "1"
+        serialize_mps = "1"
     else:
         cpu_threads = "2"
         mps_empty_cache_interval = "4"
+        serialize_mps = "0"
 
     return {
         "OMP_NUM_THREADS": cpu_threads,
@@ -95,6 +99,7 @@ def worker_performance_defaults(memory_mode: str) -> dict[str, str]:
         "VECLIB_MAXIMUM_THREADS": cpu_threads,
         "NUMEXPR_NUM_THREADS": cpu_threads,
         "LADA_MPS_EMPTY_CACHE_INTERVAL": mps_empty_cache_interval,
+        "LADA_SERIALIZE_MPS": serialize_mps,
     }
 
 
@@ -103,7 +108,7 @@ def child_environment(source_root: str | None, request: dict[str, object] | None
     memory_mode = str((request or {}).get("memoryMode", "Auto (Unified Memory)"))
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     environment.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
-    environment.setdefault("LADA_SERIALIZE_MPS", "1")
+    environment.setdefault("LADA_RETRY_SERIALIZED_MPS_ON_MPS_CRASH", "1")
     environment.setdefault("LADA_RETRY_REDUCED_MPS_ON_MPS_CRASH", "1")
     environment.setdefault("LADA_RETRY_CPU_ON_MPS_CRASH", "0")
     environment.setdefault("LADA_PROGRESS_CALLBACK_INTERVAL", "1")
@@ -310,12 +315,16 @@ def run_lada_attempt(
     lada_command: list[str],
     device: str,
     max_clip_length: int | None = None,
+    environment_overrides: dict[str, str] | None = None,
 ) -> int:
     global ACTIVE_PROCESS
     source_root = os.environ.get("LADA_SOURCE_ROOT")
     command = build_lada_command(request, lada_command, device, max_clip_length=max_clip_length)
     environment = child_environment(source_root, request)
+    if environment_overrides:
+        environment.update(environment_overrides)
     tuning_keys = (
+        "LADA_SERIALIZE_MPS",
         "OMP_NUM_THREADS",
         "MKL_NUM_THREADS",
         "VECLIB_MAXIMUM_THREADS",
@@ -396,6 +405,7 @@ def run_lada_attempt(
 def run_lada(request: dict[str, object], lada_command: list[str]) -> None:
     requested_device = str(request.get("device", "mps"))
     requested_clip_length = int(request.get("maxClipLength", 150))
+    fallback_environment_overrides: dict[str, str] | None = None
     return_code = run_lada_attempt(
         request,
         lada_command,
@@ -410,6 +420,47 @@ def run_lada(request: dict[str, object], lada_command: list[str]) -> None:
         return
 
     native_mps_crash = return_code in (-signal.SIGABRT, -signal.SIGSEGV)
+    initial_environment = child_environment(os.environ.get("LADA_SOURCE_ROOT"), request)
+    retry_serialized_mps = (
+        native_mps_crash
+        and requested_device == "mps"
+        and initial_environment.get("LADA_SERIALIZE_MPS") == "0"
+        and initial_environment.get("LADA_RETRY_SERIALIZED_MPS_ON_MPS_CRASH", "1") == "1"
+    )
+    if retry_serialized_mps:
+        emit(
+            "log",
+            message=(
+                "Apple GPU runtime aborted while parallel MPS work was enabled. "
+                "Retrying on Apple GPU with serialized MPS enabled."
+            ),
+        )
+        fallback_environment_overrides = {"LADA_SERIALIZE_MPS": "1"}
+        try:
+            pathlib.Path(str(request["output"])).unlink(missing_ok=True)
+        except OSError:
+            pass
+        return_code = run_lada_attempt(
+            request,
+            lada_command,
+            requested_device,
+            max_clip_length=requested_clip_length,
+            environment_overrides=fallback_environment_overrides,
+        )
+        if return_code == 0:
+            emit("progress", progress=1.0, remainingSeconds=0)
+            emit(
+                "completed",
+                output=request["output"],
+                simulated=False,
+                fallbackDevice="mps",
+                serializedMPS=True,
+            )
+            return
+        if return_code == 130:
+            return
+        native_mps_crash = return_code in (-signal.SIGABRT, -signal.SIGSEGV)
+
     retry_reduced_mps = (
         native_mps_crash
         and requested_device == "mps"
@@ -438,6 +489,7 @@ def run_lada(request: dict[str, object], lada_command: list[str]) -> None:
                 lada_command,
                 "mps",
                 max_clip_length=clip_length,
+                environment_overrides=fallback_environment_overrides,
             )
             if return_code == 0:
                 emit(
