@@ -76,14 +76,23 @@ def worker_performance_defaults(memory_mode: str) -> dict[str, str]:
     These remain environment defaults rather than hard overrides so advanced
     users can still experiment from the outside when profiling a specific Mac.
     """
+    # Parallel MPS (serialize_mps="0") was tried across modes but reliably
+    # crashes PyTorch's MPS backend with a thread-safety bug (arange_mps_out /
+    # NSMutableDictionary race) once detection and restoration overlap on the
+    # GPU -- confirmed on a real HUNTC-619 run, not just a synthetic test.
+    # The crash-retry fallback catches this, but it restarts lada-cli from
+    # frame 0 with no checkpoint, so relying on it as the normal path wastes
+    # all already-completed work on every crash. Serialize unconditionally
+    # until the two-pass (detect-then-restore) restructure removes the need
+    # for concurrent MPS access, or the upstream PyTorch race is fixed.
     if memory_mode == "Performance":
         cpu_threads = "4"
         mps_empty_cache_interval = "12"
-        serialize_mps = "0"
+        serialize_mps = "1"
     elif memory_mode == "Long Video":
         cpu_threads = "2"
         mps_empty_cache_interval = "3"
-        serialize_mps = "0"
+        serialize_mps = "1"
     elif memory_mode == "Conservative":
         cpu_threads = "1"
         mps_empty_cache_interval = "1"
@@ -91,7 +100,7 @@ def worker_performance_defaults(memory_mode: str) -> dict[str, str]:
     else:
         cpu_threads = "2"
         mps_empty_cache_interval = "4"
-        serialize_mps = "0"
+        serialize_mps = "1"
 
     return {
         "OMP_NUM_THREADS": cpu_threads,
